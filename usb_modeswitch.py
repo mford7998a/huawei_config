@@ -36,172 +36,160 @@ class HuaweiE173Config:
             self.logger.error(f"Error sending AT command: {e}")
             return None
 
-    def find_modem_port(self):
-        """Find the COM port for the modem"""
+    def find_modem_ports(self):
+        """Find all potential modem COM ports based on keywords"""
         if sys.platform == "win32":
-            import serial
             import serial.tools.list_ports
             
-            # If manual port is specified, try it first
-            if hasattr(self, 'manual_port') and self.manual_port:
-                self.logger.info(f"Using manually specified port: {self.manual_port}")
-                try:
-                    # Add error handling for port access
-                    try:
-                        ser = serial.Serial(
-                            port=self.manual_port,
-                            baudrate=9600,
-                            bytesize=serial.EIGHTBITS,
-                            parity=serial.PARITY_NONE,
-                            stopbits=serial.STOPBITS_ONE,
-                            timeout=1,
-                            xonxoff=False,
-                            rtscts=False,
-                            dsrdtr=False
-                        )
-                    except serial.SerialException as e:
-                        self.logger.error(f"Failed to open {self.manual_port}: {str(e)}")
-                        return None
-
-                    if ser.is_open:
-                        self.logger.info(f"Successfully opened {self.manual_port}")
-                        try:
-                            # Clear any pending data
-                            ser.reset_input_buffer()
-                            ser.reset_output_buffer()
-                            
-                            # Send AT command
-                            ser.write(b"AT\r\n")
-                            time.sleep(1)
-                            
-                            # Read response
-                            response = ser.read_all()
-                            if response:
-                                self.logger.info(f"Port {self.manual_port} responded: {response}")
-                                ser.close()
-                                return self.manual_port
-                            else:
-                                self.logger.info(f"No response from {self.manual_port}")
-                        except Exception as e:
-                            self.logger.error(f"Error communicating with port: {str(e)}")
-                        finally:
-                            ser.close()
-                    else:
-                        self.logger.error(f"Could not open {self.manual_port}")
-                except Exception as e:
-                    self.logger.error(f"Error with manual port: {str(e)}")
-                    return None
-
-            # Fall back to auto-detection if manual port fails or isn't specified
+            # Keywords that might indicate a Huawei modem port
+            keywords = [
+                'huawei',
+                'mobile',
+                'modem',
+                'com port',
+                'serial',
+                'VID_12D1',  # Huawei Vendor ID
+                'USB Serial'
+            ]
+            
+            potential_ports = []
             ports = serial.tools.list_ports.comports()
             
-            self.logger.info("Scanning for modem ports...")
-            self.logger.info(f"Looking for VID_{self.vendor_id} and PID_{self.product_id}")
+            self.logger.info("Scanning for potential modem ports...")
             
             for port in ports:
-                self.logger.info(f"\nPort details:")
+                port_info = f"{port.device} {port.description} {port.hwid}".lower()
+                self.logger.info(f"\nFound port:")
                 self.logger.info(f"Device: {port.device}")
                 self.logger.info(f"Description: {port.description}")
                 self.logger.info(f"Hardware ID: {port.hwid}")
                 
-                # More permissive check for Huawei device
-                if "VID_12D1" in port.hwid:
-                    self.logger.info(f"Found Huawei device on {port.device}")
-                    try:
-                        ser = serial.Serial(
-                            port=port.device,
-                            baudrate=9600,
-                            bytesize=serial.EIGHTBITS,
-                            parity=serial.PARITY_NONE,
-                            stopbits=serial.STOPBITS_ONE,
-                            timeout=1
-                        )
-                        
-                        if ser.is_open:
-                            ser.write(b"AT\r\n")
-                            time.sleep(1)
-                            response = ser.read_all()
-                            ser.close()
-                            
-                            if response:
-                                self.logger.info(f"Port {port.device} responded to AT command")
-                                return port.device
-                            else:
-                                self.logger.info(f"No response from {port.device}")
-                    except Exception as e:
-                        self.logger.info(f"Could not open {port.device}: {str(e)}")
-                        continue
-            
-            self.logger.error("No responsive modem port found")
-            return None
+                # Check if any keyword matches
+                if any(keyword.lower() in port_info for keyword in keywords):
+                    self.logger.info(f"Port {port.device} matches keywords")
+                    potential_ports.append(port.device)
+                
+            self.logger.info(f"Found {len(potential_ports)} potential modem ports: {potential_ports}")
+            return potential_ports
 
-    def switch_to_modem_mode(self):
-        """Switch the device to modem-only mode"""
+        return []
+
+    def try_configure_port(self, port):
+        """Attempt to configure a specific port"""
         try:
-            # Try multiple times to find the port
-            max_attempts = 3
-            port = None
+            self.logger.info(f"\nAttempting to configure port: {port}")
             
-            for attempt in range(max_attempts):
-                self.logger.info(f"Attempt {attempt + 1} to find modem port...")
-                port = self.find_modem_port()
-                if port:
-                    break
-                time.sleep(2)  # Wait before retry
-            
-            if not port:
-                self.logger.error(f"No modem port found after {max_attempts} attempts")
+            # Try to open the port
+            try:
+                ser = serial.Serial(
+                    port=port,
+                    baudrate=self.baud_rate if hasattr(self, 'baud_rate') else 9600,
+                    bytesize=serial.EIGHTBITS,
+                    parity=serial.PARITY_NONE,
+                    stopbits=serial.STOPBITS_ONE,
+                    timeout=1
+                )
+            except serial.SerialException as e:
+                self.logger.error(f"Could not open {port}: {str(e)}")
                 return False
 
-            self.logger.info(f"Found modem on port {port}")
-            
-            # Try different command sets
-            command_sets = [
-                # First set - Standard commands
-                [
-                    "AT+CFUN=1",
-                    "AT^SETPORT=A1,A2",
-                    "AT^U2DIAG=0",
-                ],
-                # Second set - Alternative commands
-                [
-                    "AT^SETPORT=1,0",
-                    "AT^SYSCFG=13,1,3FFFFFFF,2,4",
-                    "AT+CFUN=1",
-                ],
-                # Third set - Minimal commands
-                [
-                    "AT+CFUN=1",
-                    "AT^U2DIAG=0",
-                ]
-            ]
+            if not ser.is_open:
+                self.logger.error(f"Could not open {port}")
+                return False
 
-            for command_set in command_sets:
-                self.logger.info(f"Trying command set: {command_set}")
-                success = True
+            try:
+                # Test AT command
+                ser.write(b"AT\r\n")
+                time.sleep(1)
+                response = ser.read_all()
                 
-                for cmd in command_set:
-                    response = self.send_at_command(port, cmd, wait_time=2)
-                    self.logger.info(f"Command: {cmd} -> Response: {response}")
+                if not response:
+                    self.logger.info(f"No response from {port}")
+                    ser.close()
+                    return False
+
+                self.logger.info(f"Port {port} responded to AT command")
+                
+                # Try command sets
+                command_sets = [
+                    # First set - Standard commands
+                    [
+                        "AT+CFUN=1",
+                        "AT^SETPORT=A1,A2",
+                        "AT^U2DIAG=0",
+                    ],
+                    # Second set - Alternative commands
+                    [
+                        "AT^SETPORT=1,0",
+                        "AT^SYSCFG=13,1,3FFFFFFF,2,4",
+                        "AT+CFUN=1",
+                    ],
+                    # Third set - Minimal commands
+                    [
+                        "AT+CFUN=1",
+                        "AT^U2DIAG=0",
+                    ]
+                ]
+
+                for command_set in command_sets:
+                    success = True
+                    self.logger.info(f"Trying command set on {port}: {command_set}")
                     
-                    if not response or "ERROR" in response:
-                        self.logger.error(f"Failed with command: {cmd}")
-                        success = False
-                        break
+                    for cmd in command_set:
+                        ser.write(f"{cmd}\r\n".encode())
+                        time.sleep(2)
+                        response = ser.read_all().decode(errors='ignore')
+                        self.logger.info(f"Command: {cmd} -> Response: {response}")
+                        
+                        if not response or "ERROR" in response:
+                            success = False
+                            break
+                    
+                    if success:
+                        self.logger.info(f"Successfully configured port {port}")
+                        ser.close()
+                        return True
+                    
+                    self.logger.info("Command set failed, trying next set...")
                     time.sleep(1)
                 
-                if success:
-                    self.logger.info("Successfully configured modem")
-                    return True
-                    
-                self.logger.info("Command set failed, trying next set...")
-                time.sleep(2)
+                ser.close()
+                return False
 
-            self.logger.error("All command sets failed")
+            except Exception as e:
+                self.logger.error(f"Error configuring {port}: {str(e)}")
+                if ser.is_open:
+                    ser.close()
+                return False
+
+        except Exception as e:
+            self.logger.error(f"Error in try_configure_port for {port}: {str(e)}")
+            return False
+
+    def switch_to_modem_mode(self):
+        """Try to configure all potential modem ports"""
+        try:
+            potential_ports = self.find_modem_ports()
+            
+            if not potential_ports:
+                self.logger.error("No potential modem ports found")
+                return False
+
+            self.logger.info(f"Found {len(potential_ports)} potential ports to try")
+            
+            for port in potential_ports:
+                if self.try_configure_port(port):
+                    self.logger.info(f"Successfully configured modem on port {port}")
+                    return True
+                else:
+                    self.logger.info(f"Failed to configure port {port}, trying next port...")
+                    time.sleep(1)
+            
+            self.logger.error("Failed to configure any ports")
             return False
 
         except Exception as e:
-            self.logger.error(f"Error configuring modem: {e}")
+            self.logger.error(f"Error in switch_to_modem_mode: {e}")
             return False
 
     def save_configuration(self):

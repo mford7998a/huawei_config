@@ -1,50 +1,54 @@
 import sys
-from usb_modeswitch import HuaweiE173Config
 import serial.tools.list_ports
+from usb_modeswitch import HuaweiE173Config
+
+def list_available_ports():
+    """Display all available COM ports"""
+    print("\nAvailable ports:")
+    ports = serial.tools.list_ports.comports()
+    for i, port in enumerate(ports, 1):
+        print(f"\n{i}. Port: {port.device}")
+        print(f"   Description: {port.description}")
+        print(f"   Hardware ID: {port.hwid}")
+    return ports
 
 def main():
     config = HuaweiE173Config()
     
     print("Huawei Modem Configuration Tool")
     print("-------------------------------")
-    print("Detected ports:")
     
-    ports = serial.tools.list_ports.comports()
-    for port in ports:
-        print(f"\nPort: {port.device}")
-        print(f"Description: {port.description}")
-        print(f"Hardware ID: {port.hwid}")
+    print("\nSelect operation mode:")
+    print("1. Automatic port detection and configuration")
+    print("2. Manual port selection")
     
-    # Add manual port selection
-    print("\nSelect an option:")
-    print("1. Auto-detect modem port")
-    print("2. Manually enter COM port")
-    
-    choice = input("Enter choice (1 or 2): ")
+    choice = input("\nEnter choice (1 or 2): ").strip()
     
     if choice == "2":
-        port_num = input("Enter COM port number (e.g., 930): ")
-        config.manual_port = f"COM{port_num}"
+        ports = list(list_available_ports())
+        if not ports:
+            print("No COM ports found!")
+            sys.exit(1)
+            
+        while True:
+            try:
+                port_num = input("\nEnter port number (or 'q' to quit): ").strip()
+                if port_num.lower() == 'q':
+                    sys.exit(0)
+                    
+                port_idx = int(port_num) - 1
+                if 0 <= port_idx < len(ports):
+                    config.manual_port = ports[port_idx].device
+                    break
+                else:
+                    print("Invalid port number!")
+            except ValueError:
+                print("Please enter a valid number!")
         
-        print("\nSelect baud rate:")
-        print("1. 9600 (default)")
-        print("2. 115200")
-        print("3. 57600")
-        print("4. 38400")
-        
-        baud_choice = input("Enter choice (1-4): ")
-        baud_rates = {
-            "1": 9600,
-            "2": 115200,
-            "3": 57600,
-            "4": 38400
-        }
-        config.baud_rate = baud_rates.get(baud_choice, 9600)
+        print(f"\nAttempting to configure port {config.manual_port}...")
     else:
-        config.manual_port = None
-        config.baud_rate = 9600
+        print("\nScanning for modem ports...")
     
-    print("\nAttempting to configure modem...")
     if config.switch_to_modem_mode():
         print("\nSuccessfully configured modem to SMS-only mode")
         
