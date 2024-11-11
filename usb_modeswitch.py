@@ -4,12 +4,14 @@ import time
 import serial
 import logging
 from pathlib import Path
+import winreg
+import ctypes
 
 class HuaweiE173Config:
     def __init__(self):
         self.logger = self._setup_logging()
         self.vendor_id = "12d1"  # Huawei vendor ID
-        self.product_id = "140c"  # Your device's current product ID
+        self.product_id = "140c"  # Initial product ID
         self.target_pid = "1436"  # Target modem mode product ID
         
     def _setup_logging(self):
@@ -41,21 +43,10 @@ class HuaweiE173Config:
         if sys.platform == "win32":
             import serial.tools.list_ports
             
-            # Keywords that might indicate a Huawei modem port
-            keywords = [
-                'huawei',
-                'mobile',
-                'modem',
-                'com port',
-                'serial',
-                'VID_12D1',  # Huawei Vendor ID
-                'USB Serial'
-            ]
-            
             potential_ports = []
             ports = serial.tools.list_ports.comports()
             
-            self.logger.info("Scanning for potential modem ports...")
+            self.logger.info("Scanning for Huawei modem ports...")
             
             for port in ports:
                 port_info = f"{port.device} {port.description} {port.hwid}".lower()
@@ -64,22 +55,68 @@ class HuaweiE173Config:
                 self.logger.info(f"Description: {port.description}")
                 self.logger.info(f"Hardware ID: {port.hwid}")
                 
-                # Check if any keyword matches
-                if any(keyword.lower() in port_info for keyword in keywords):
-                    self.logger.info(f"Port {port.device} matches keywords")
+                # Only match Huawei devices
+                if 'huawei' in port_info or 'vid_12d1' in port_info:
+                    self.logger.info(f"Found Huawei device on port {port.device}")
                     potential_ports.append(port.device)
-                
-            self.logger.info(f"Found {len(potential_ports)} potential modem ports: {potential_ports}")
+                else:
+                    self.logger.info(f"Skipping non-Huawei port {port.device}")
+                    
+            self.logger.info(f"Found {len(potential_ports)} Huawei modem ports: {potential_ports}")
             return potential_ports
 
         return []
+
+    def modify_windows_registry(self):
+        """Modify Windows registry to prevent CD-ROM detection"""
+        try:
+            # Disable USBSTOR
+            key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, 
+                               r"SYSTEM\CurrentControlSet\Services\USBSTOR",
+                               0, winreg.KEY_SET_VALUE)
+            winreg.SetValueEx(key, "Start", 0, winreg.REG_DWORD, 4)
+            
+            # Disable AutoRun
+            key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, 
+                               r"SYSTEM\CurrentControlSet\Services\cdrom",
+                               0, winreg.KEY_SET_VALUE)
+            winreg.SetValueEx(key, "AutoRun", 0, winreg.REG_DWORD, 0)
+            return True
+        except Exception as e:
+            self.logger.error(f"Registry modification failed: {e}")
+            return False
+
+    def send_usb_control_message(self):
+        """Send USB control message to switch mode"""
+        try:
+            import usb.core
+            import usb.util
+            
+            dev = usb.core.find(idVendor=0x12d1, idProduct=int(self.product_id, 16))
+            if dev is None:
+                self.logger.error("Device not found")
+                return False
+                
+            # Standard USB mode switch message for E173
+            message = bytes.fromhex("55534243123456780000000000000011062000000100000000000000000000")
+            
+            try:
+                dev.ctrl_transfer(0x21, 0x20, 0, 0, message)
+                time.sleep(3)  # Wait for device to switch
+                return True
+            except Exception as e:
+                self.logger.error(f"Control transfer failed: {e}")
+                return False
+                
+        except Exception as e:
+            self.logger.error(f"USB control message failed: {e}")
+            return False
 
     def try_configure_port(self, port):
         """Attempt to configure a specific port"""
         try:
             self.logger.info(f"\nAttempting to configure port: {port}")
             
-            # Try to open the port
             try:
                 ser = serial.Serial(
                     port=port,
@@ -87,7 +124,7 @@ class HuaweiE173Config:
                     bytesize=serial.EIGHTBITS,
                     parity=serial.PARITY_NONE,
                     stopbits=serial.STOPBITS_ONE,
-                    timeout=1
+                    timeout=3
                 )
             except serial.SerialException as e:
                 self.logger.error(f"Could not open {port}: {str(e)}")
@@ -98,60 +135,75 @@ class HuaweiE173Config:
                 return False
 
             try:
-                # Test AT command
-                ser.write(b"AT\r\n")
-                time.sleep(1)
-                response = ser.read_all()
-                
-                if not response:
-                    self.logger.info(f"No response from {port}")
-                    ser.close()
-                    return False
+                ser.reset_input_buffer()
+                ser.reset_output_buffer()
 
-                self.logger.info(f"Port {port} responded to AT command")
-                
-                # Try command sets
+                # Enhanced command sets with all known commands
                 command_sets = [
-                    # First set - Standard commands
+                    # Set 1: Advanced configuration with unlock
                     [
-                        "AT+CFUN=1",
-                        "AT^SETPORT=A1,A2",
-                        "AT^U2DIAG=0",
+                        ("AT^DATALOCK=\"A2D2C2E2\"", "OK", 3),  # Unlock advanced settings
+                        ("AT^U2DIAG=0", "OK", 3),  # Disable CD-ROM
+                        ("AT^SETPORT=\"FF;12,10,16\"", "OK", 3),  # Force modem mode
+                        ("AT^CARDMODE=2", "OK", 3),  # Force modem mode
+                        ("AT+CFUN=1,1", "OK", 3),  # Reset device
                     ],
-                    # Second set - Alternative commands
+                    # Set 2: Standard configuration
                     [
-                        "AT^SETPORT=1,0",
-                        "AT^SYSCFG=13,1,3FFFFFFF,2,4",
-                        "AT+CFUN=1",
+                        ("AT+CFUN=0", "OK", 3),  # Reset device
+                        ("AT^SETPORT=A1,A2", "OK", 3),  # Set ports to modem mode
+                        ("AT^U2DIAG=0", "OK", 3),  # Disable CD-ROM
+                        ("AT^RESET", "OK", 3),  # Hard reset
                     ],
-                    # Third set - Minimal commands
+                    # Set 3: Alternative port configuration
                     [
-                        "AT+CFUN=1",
-                        "AT^U2DIAG=0",
+                        ("AT^SETPORT=\"1,2,3,4\"", "OK", 3),  # Alternative port config
+                        ("AT^U2DIAG=256", "OK", 3),  # Alternative CD-ROM disable
+                        ("AT+CFUN=1,1", "OK", 3),  # Reset device
+                    ],
+                    # Set 4: Minimal configuration
+                    [
+                        ("AT^U2DIAG=0", "OK", 3),
+                        ("AT+CFUN=1", "OK", 3),
                     ]
                 ]
 
+                # Try each command set
                 for command_set in command_sets:
                     success = True
-                    self.logger.info(f"Trying command set on {port}: {command_set}")
+                    self.logger.info(f"\nTrying command set on {port}:")
                     
-                    for cmd in command_set:
+                    for cmd, expected_response, timeout in command_set:
+                        self.logger.info(f"\nSending command: {cmd}")
+                        ser.reset_input_buffer()
                         ser.write(f"{cmd}\r\n".encode())
-                        time.sleep(2)
-                        response = ser.read_all().decode(errors='ignore')
-                        self.logger.info(f"Command: {cmd} -> Response: {response}")
                         
-                        if not response or "ERROR" in response:
+                        total_response = ""
+                        start_time = time.time()
+                        
+                        while (time.time() - start_time) < timeout:
+                            if ser.in_waiting:
+                                chunk = ser.read_all().decode(errors='ignore')
+                                total_response += chunk
+                                self.logger.info(f"Received chunk: {chunk}")
+                                
+                                if expected_response in total_response:
+                                    break
+                            time.sleep(0.1)
+                        
+                        self.logger.info(f"Final response: {total_response}")
+                        
+                        if expected_response not in total_response:
                             success = False
                             break
+                        
+                        time.sleep(1)
                     
                     if success:
-                        self.logger.info(f"Successfully configured port {port}")
                         ser.close()
                         return True
                     
-                    self.logger.info("Command set failed, trying next set...")
-                    time.sleep(1)
+                    time.sleep(2)
                 
                 ser.close()
                 return False
@@ -167,8 +219,19 @@ class HuaweiE173Config:
             return False
 
     def switch_to_modem_mode(self):
-        """Try to configure all potential modem ports"""
+        """Try all available methods to switch the modem"""
         try:
+            # 1. Try registry modification first
+            self.logger.info("Attempting registry modification...")
+            self.modify_windows_registry()
+            time.sleep(2)
+
+            # 2. Try USB control message
+            self.logger.info("Attempting USB mode switch...")
+            if self.send_usb_control_message():
+                time.sleep(3)  # Wait for device to reset
+
+            # 3. Try AT commands on all potential ports
             potential_ports = self.find_modem_ports()
             
             if not potential_ports:
@@ -194,15 +257,37 @@ class HuaweiE173Config:
 
     def save_configuration(self):
         """Save the current configuration to persist across reboots"""
-        port = self.find_modem_port()
-        if port:
+        try:
+            # If we have a manual port that worked, use it
+            if hasattr(self, 'manual_port'):
+                port = self.manual_port
+            else:
+                # Otherwise try to find a working port
+                potential_ports = self.find_modem_ports()
+                if not potential_ports:
+                    self.logger.error("No modem ports found for saving configuration")
+                    return False
+                port = potential_ports[0]  # Try the first potential port
+
+            self.logger.info(f"Attempting to save configuration on port {port}")
+            
             # Save settings and reset device
             commands = [
                 "AT&W",  # Save settings
                 "AT+CFUN=1,1"  # Reset device
             ]
+            
+            success = True
             for cmd in commands:
-                self.send_at_command(port, cmd)
+                response = self.send_at_command(port, cmd, wait_time=2)
+                if not response or "ERROR" in response:
+                    self.logger.error(f"Failed to execute {cmd} on {port}")
+                    success = False
+                    break
                 time.sleep(2)
-            return True
-        return False
+            
+            return success
+
+        except Exception as e:
+            self.logger.error(f"Error saving configuration: {e}")
+            return False
